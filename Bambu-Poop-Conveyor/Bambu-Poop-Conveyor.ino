@@ -20,7 +20,7 @@ char password[40] = "your-wifi-password";
 // MQTT credentials
 char mqtt_server[40] = "your-bambu-printer-ip";
 char mqtt_password[30] = "your-bambu-printer-accesscode";
-char serial_number[20] = "your-bambu-printer-serial-number";
+char serial_number[20] = "bambu-serial-number";
 
 // --------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -57,7 +57,7 @@ int additionalWaitTime = 0; // Variable to store additional wait time for specif
 // Setting PWM properties
 const int freq = 5000;
 const int pwmChannel = 0;
-const int pwmTimer = 0; 
+const int pwmTimer = 0; // Define the timer (use 0 if you didn't have one before)
 const int resolution = 8;
 int dutyCycle = 225;
 
@@ -85,6 +85,10 @@ unsigned int yellowLightState = 0;
 bool motorRunning = false;
 bool motorWaiting = false;
 bool delayAfterRunning = false;
+
+unsigned long runMotorNoneConnected = 0;
+unsigned long runMotorNoneConnectedTime = 45; // Roughly 10 mins
+unsigned long lastWiFiAttemptTime = 0;
 
 #define MAX_LOG_ENTRIES 100
 
@@ -513,17 +517,7 @@ void setup() {
     debug = preferences.getBool("debug", debug);
 
     // Connect to WiFi
-    WiFi.begin(ssid, password);
-    if (debug) Serial.print("Connecting to WiFi ..");
-    while (WiFi.status() != WL_CONNECTED) {
-        digitalWrite(greenLight, LOW);
-        digitalWrite(yellowLight, HIGH);
-        delay(1000);
-        digitalWrite(yellowLight, LOW);
-        if (debug) Serial.print('.');
-    }
-
-    digitalWrite(greenLight, HIGH);
+    connectToWiFi();
 
     if (debug) {
         Serial.println();
@@ -569,6 +563,29 @@ void setup() {
     sendPushAllCommand();
 }
 
+// Connect to the wifi.
+void connectToWiFi()
+{
+    WiFi.begin(ssid, password);
+    if (debug) Serial.print("Connecting to WiFi ..");
+    while (WiFi.status() != WL_CONNECTED) {
+        digitalWrite(greenLight, LOW);
+        digitalWrite(yellowLight, HIGH);
+        delay(1000);
+        digitalWrite(yellowLight, LOW);
+        if (debug) Serial.print('.');
+
+        lastWiFiAttemptTime = millis();
+        if(millis() - lastWiFiAttemptTime > RECONNECT_INTERVAL)
+          break;
+    }
+
+    if (WiFi.status() == WL_CONNECTED)
+      digitalWrite(greenLight, HIGH);
+    else
+      digitalWrite(redLight, HIGH);
+}
+
 // Loop function
 // Add this variable to track if MQTT is in reconnecting state
 bool mqttReconnecting = false;
@@ -580,9 +597,13 @@ void loop() {
         if (!wifiConnected) {
             wifiConnected = true;
             pushAllCommandSent = false;
+            digitalWrite(redLight, LOW);
+            digitalWrite(greenLight, HIGH); // Turn on the green light if network connected
         }
     } else {
         wifiConnected = false;
+        digitalWrite(greenLight, LOW); // Turn off green light if lost Network
+        digitalWrite(redLight, HIGH); // Turn on red light to indicate no network
     }
 
     if (client.connected()) {
@@ -595,7 +616,6 @@ void loop() {
         if (mqttConnected) {
             mqttConnected = false;
         }
-
         // Flash the yellow light when trying to reconnect
         unsigned long currentMillis = millis();
         if (currentMillis - yellowLightStartTime >= 500) {  // Flash every 500ms
@@ -605,9 +625,24 @@ void loop() {
         }
     }
 
+    // Checking mqtt connection, if not connecting anymore will attempt to reconnect.
+    // This begans the timer to move conveyor if no conncet after specifed time above. Roughly 10 mins
     if (!client.connected() && (millis() - lastAttemptTime) > RECONNECT_INTERVAL) {
-        digitalWrite(yellowLight, HIGH);  // Keep the yellow light on while attempting to connect
-        connectToMqtt();
+        if(!motorRunning)
+        {
+          digitalWrite(yellowLight, HIGH);  // Keep the yellow light on while attempting to connect
+          connectToMqtt();
+        
+          if(runMotorNoneConnected >= runMotorNoneConnectedTime) {          
+            runMotorNoneConnected = 0;
+            digitalWrite(redLight, LOW); // when connected or reconnecting to web, this will turn off red light
+            connectToWeb();
+          }          
+          if(!client.connected()) {
+            runMotorNoneConnected++; // Counter incase we need to move the conveyor.
+            digitalWrite(redLight, HIGH); // if no longer connected will turn on red light
+          } 
+        }
     }
 
     if (autoPushAllEnabled) {
@@ -622,7 +657,9 @@ void loop() {
     }
 
     // Handle motor waiting state
-    if (motorWaiting && millis() - motorWaitStartTime >= (motorWaitTime + additionalWaitTime)) {
+    if ((motorWaiting && millis() - motorWaitStartTime >= (motorWaitTime + additionalWaitTime)) || (runMotorNoneConnected >= runMotorNoneConnectedTime) && !motorRunning ) {
+        if(runMotorNoneConnected >= runMotorNoneConnectedTime) // if we have exceeded the counter amount we need to track when motor starts.
+          motorWaitStartTime = millis();
         motorWaiting = false;
         motorRunning = true;
         motorRunStartTime = millis();
@@ -637,7 +674,7 @@ void loop() {
     // Handle motor running state
     if (motorRunning && millis() - motorRunStartTime >= motorRunTime) {
         motorRunning = false;
-        delayAfterRunning = true;
+        delayAfterRunning = true;  
         delayAfterRunStartTime = millis();
         if (debug) Serial.println("Motor stopped");
         digitalWrite(motor1Pin1, LOW);
