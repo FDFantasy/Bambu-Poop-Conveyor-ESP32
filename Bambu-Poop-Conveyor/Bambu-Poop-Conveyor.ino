@@ -568,6 +568,7 @@ void connectToWiFi()
 {
     WiFi.begin(ssid, password);
     if (debug) Serial.print("Connecting to WiFi ..");
+    lastWiFiAttemptTime = millis();
     while (WiFi.status() != WL_CONNECTED) {
         digitalWrite(greenLight, LOW);
         digitalWrite(yellowLight, HIGH);
@@ -575,7 +576,6 @@ void connectToWiFi()
         digitalWrite(yellowLight, LOW);
         if (debug) Serial.print('.');
 
-        lastWiFiAttemptTime = millis();
         if(millis() - lastWiFiAttemptTime > RECONNECT_INTERVAL)
           break;
     }
